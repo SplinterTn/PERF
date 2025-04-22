@@ -1,0 +1,177 @@
+# .github/workflows/code-review.yml
+name: Multi-Language Code Review Bot
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened] # Run on PR events
+
+# Permissions needed for Checkouts and writing PR comments/reviews
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write # Optional: Some reporters might use checks
+
+jobs:
+  lint-review:
+    name: Run Linters with Reviewdog
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@0d381219ddf674d61a7572ddd194aca967146b85 # v2.9.0
+        with:
+          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+
+      - name: Checkout Code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          # Fetch full history for accurate diff comparisons by linters
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------------
+      # Setup Environments (Add/remove as needed for your project)
+      # -----------------------------------------------------------------------
+      - name: Setup Python
+        id: setup-python
+        uses: actions/setup-python@82c91821eed308056357374a338f28e6c38ece89 # v5.1.0
+        with:
+          python-version: '3.11' # Specify your project's Python version
+
+      - name: Setup Node.js
+        id: setup-node
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+        with:
+          node-version: '18' # Specify your project's Node version
+          cache: 'npm' # Enable caching for npm dependencies
+
+      # If using Go linters:
+      # - name: Setup Go
+      #   uses: actions/setup-go@v5
+      #   with:
+      #     go-version: '1.21'
+
+      # -----------------------------------------------------------------------
+      # Install Dependencies (Adapt commands based on your package manager)
+      # -----------------------------------------------------------------------
+      - name: Install Python Linters
+        run: |
+          python -m pip install --upgrade pip
+          # Install from requirements file if you have one, otherwise install directly
+          # pip install -r requirements-dev.txt
+          pip install flake8==7.0.0 yamllint==1.35.1 # Example: Install specific linters
+        if: steps.setup-python.outcome == 'success'
+
+      - name: Install Node Linters & Dependencies
+        run: |
+          # Install project dependencies (which should include ESLint, Markdownlint etc.)
+          npm ci
+          # Or, if linters are not in package.json, install globally (less recommended)
+          # npm install -g eslint@8 markdownlint-cli@0.39.0
+        if: steps.setup-node.outcome == 'success'
+
+      # Install ShellCheck (often pre-installed, but good to be explicit)
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # -----------------------------------------------------------------------
+      # Setup Reviewdog
+      # -----------------------------------------------------------------------
+      - name: Setup Reviewdog
+        uses: reviewdog/action-setup@f106d522e7615545904d7656f995f9307990d414 # v1.1.0
+        with:
+          reviewdog_version: latest
+
+      # -----------------------------------------------------------------------
+      # Run Linters via Reviewdog (Add/remove/configure sections as needed)
+      # Common parameters:
+      #   github_token: ${{ secrets.GITHUB_TOKEN }} - Token to post comments
+      #   reporter: github-pr-review - Post results as inline review comments
+      #   level: warning - Report warnings and errors (use 'error' for errors only)
+      #   filter_mode: added - IMPORTANT: Only reports issues on lines changed in the PR
+      #   fail_on_error: true - Fail the workflow step if any errors (matching 'level') are found
+      # -----------------------------------------------------------------------
+
+      # == Python: Flake8 ==
+      - name: Run Flake8 (Python)
+        uses: reviewdog/action-flake8@8990b3647bc2b8d9919f2add53c4869488408545 # v3.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-review
+          level: warning
+          filter_mode: added
+          fail_on_error: true
+          flake8_args: "--max-line-length=100" # Optional: Add custom flake8 flags
+        # Only run if Python setup succeeded and Python files might exist
+        if: steps.setup-python.outcome == 'success'
+
+      # == JavaScript/TypeScript: ESLint ==
+      - name: Run ESLint (JS/TS)
+        uses: reviewdog/action-eslint@69c6f04a7f4359623a4e3532b4b80c5a881a6f13 # v1.31.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-review
+          level: warning
+          filter_mode: added
+          fail_on_error: true
+          # Adjust the glob pattern for your source files
+          eslint_flags: 'src/**/*.{js,jsx,ts,tsx} tests/**/*.{js,ts}'
+        # Only run if Node setup succeeded and JS/TS files might exist
+        if: steps.setup-node.outcome == 'success'
+
+      # == Shell Scripts: ShellCheck ==
+      # Uses the generic reviewdog command, piping ShellCheck's checkstyle output
+      - name: Run ShellCheck (Shell)
+        # Find shell scripts (adjust pattern if needed), exclude vendor dirs etc.
+        # Run shellcheck, format as checkstyle, pipe to reviewdog
+        run: |
+          find . -type f -name '*.sh' -not -path './node_modules/*' -not -path './.venv/*' -print0 | \
+          xargs -0 -r shellcheck -f checkstyle | \
+          reviewdog -f=checkstyle \
+              -name="ShellCheck" \
+              -reporter="github-pr-review" \
+              -filter-mode="added" \
+              -fail-on-error="true" \
+              -level="warning"
+        env:
+          # Pass token to the reviewdog command
+          REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # == YAML: yamllint ==
+      - name: Run yamllint (YAML)
+        uses: reviewdog/action-yamllint@7da9a543b46123e343bf5b02167e34b98a6e86e3 # v1.9.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-review
+          level: warning
+          filter_mode: added
+          fail_on_error: true
+          yamllint_flags: '-c .yamllint.yml .' # Specify config and target dir/files
+        # Only run if Python setup succeeded (yamllint installed via pip)
+        if: steps.setup-python.outcome == 'success'
+
+      # == Markdown: markdownlint ==
+      - name: Run Markdownlint (Markdown)
+        uses: reviewdog/action-markdownlint@94d85436434279e66cfd064106592e305f72b9f6 # v1.18.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-review
+          level: warning
+          filter_mode: added
+          fail_on_error: true
+          markdownlint_flags: '**/*.md' # Glob pattern for Markdown files
+          # Exclude node_modules by default using .markdownlintignore or flags if needed
+        # Only run if Node setup succeeded (markdownlint-cli installed via npm)
+        if: steps.setup-node.outcome == 'success'
+
+      # == Add other linters here following similar patterns ==
+      # Example for Go using golangci-lint:
+      # - name: Run golangci-lint (Go)
+      #   uses: reviewdog/action-golangci-lint@v2
+      #   with:
+      #     github_token: ${{ secrets.GITHUB_TOKEN }}
+      #     reporter: github-pr-review
+      #     level: warning
+      #     filter_mode: added
+      #     fail_on_error: true
+      #     golangci_lint_flags: "--config=.golangci.yml ./..."
+      #   if: steps.setup-go.outcome == 'success' # Assumes setup-go step exists
